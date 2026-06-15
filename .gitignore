@@ -13,6 +13,10 @@
 # testing
 /coverage
 
+# caches
+.turbo
+.cache
+
 # next.js
 /.next/
 /out/
@@ -23,6 +27,10 @@
 # misc
 .DS_Store
 *.pem
+*.tmp
+*.temp
+tmp/
+temp/
 
 # debug
 npm-debug.log*
@@ -32,6 +40,8 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+!.env.local.example
 
 # vercel
 .vercel
