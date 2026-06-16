@@ -51,6 +51,18 @@ function createLocalId() {
   return crypto.randomUUID()
 }
 
+function formatCustomerSelectLabel(customer: Customer) {
+  return customer.phone ? `${customer.name} · ${customer.phone}` : customer.name
+}
+
+function formatProductSelectLabel(product: Product) {
+  return `${product.name} · ${formatCurrency(product.sale_price)}`
+}
+
+function getPaymentMethodLabel(value: PaymentMethod) {
+  return PAYMENT_METHODS.find((method) => method.value === value)?.label ?? value
+}
+
 export function OrderForm({ customers, products, order }: OrderFormProps) {
   const router = useRouter()
   const isEditing = !!order
@@ -69,10 +81,29 @@ export function OrderForm({ customers, products, order }: OrderFormProps) {
   )
   const [selectedProductId, setSelectedProductId] = useState(products[0]?.id ?? '')
 
-  const productById = useMemo(
-    () => new Map(products.map((product) => [product.id, product])),
-    [products],
+  const customerById = useMemo(
+    () => new Map(customers.map((customer) => [customer.id, customer])),
+    [customers],
   )
+  const selectableProducts = useMemo(() => {
+    const productMap = new Map(products.map((product) => [product.id, product]))
+
+    for (const item of order?.order_items ?? []) {
+      if (!productMap.has(item.product_id)) {
+        productMap.set(item.product_id, item.product)
+      }
+    }
+
+    return Array.from(productMap.values())
+  }, [order?.order_items, products])
+  const productById = useMemo(
+    () => new Map(selectableProducts.map((product) => [product.id, product])),
+    [selectableProducts],
+  )
+  const selectedCustomer = customerId ? customerById.get(customerId) : null
+  const selectedProduct = selectedProductId
+    ? productById.get(selectedProductId)
+    : null
 
   const summary = useMemo(() => {
     const subtotal = items.reduce(
@@ -168,13 +199,17 @@ export function OrderForm({ customers, products, order }: OrderFormProps) {
                 }
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Selecione um cliente" />
+                  <SelectValue placeholder="Selecione um cliente">
+                    {selectedCustomer
+                      ? formatCustomerSelectLabel(selectedCustomer)
+                      : 'Sem cliente'}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">Sem cliente</SelectItem>
                   {customers.map((customer) => (
                     <SelectItem key={customer.id} value={customer.id}>
-                      {customer.name}
+                      {formatCustomerSelectLabel(customer)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -199,7 +234,7 @@ export function OrderForm({ customers, products, order }: OrderFormProps) {
                 onValueChange={(value) => setPaymentMethod(value as PaymentMethod)}
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue />
+                  <SelectValue>{getPaymentMethodLabel(paymentMethod)}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {PAYMENT_METHODS.map((method) => (
@@ -247,12 +282,16 @@ export function OrderForm({ customers, products, order }: OrderFormProps) {
                 onValueChange={(value) => setSelectedProductId(value ?? '')}
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Escolha um produto" />
+                  <SelectValue placeholder="Escolha um produto">
+                    {selectedProduct
+                      ? formatProductSelectLabel(selectedProduct)
+                      : 'Escolha um produto'}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  {products.map((product) => (
+                  {selectableProducts.map((product) => (
                     <SelectItem key={product.id} value={product.id}>
-                      {product.name} · {formatCurrency(product.sale_price)}
+                      {formatProductSelectLabel(product)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -293,12 +332,16 @@ export function OrderForm({ customers, products, order }: OrderFormProps) {
                           }}
                         >
                           <SelectTrigger className="w-full">
-                            <SelectValue />
+                            <SelectValue>
+                              {product
+                                ? formatProductSelectLabel(product)
+                                : 'Produto não encontrado'}
+                            </SelectValue>
                           </SelectTrigger>
                           <SelectContent>
-                            {products.map((productOption) => (
+                            {selectableProducts.map((productOption) => (
                               <SelectItem key={productOption.id} value={productOption.id}>
-                                {productOption.name}
+                                {formatProductSelectLabel(productOption)}
                               </SelectItem>
                             ))}
                           </SelectContent>

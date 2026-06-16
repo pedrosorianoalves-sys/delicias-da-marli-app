@@ -27,13 +27,13 @@ type ProductRow = Omit<Product, 'cmv_percent'> & {
   cmv?: number | null
 }
 
-type RecipeWithItemsRow = Recipe & {
-  recipe_items?: { id: string }[]
-}
-
 type RecipeItemRow = RecipeItem & {
   ingredient: Ingredient | Ingredient[] | null
 }
+
+type RecipeSummaryRow = Pick<Recipe, 'id' | 'product_id'>
+
+type RecipeItemSummaryRow = Pick<RecipeItem, 'recipe_id'>
 
 const VALID_UNITS: Unit[] = ['g', 'kg', 'ml', 'l', 'unidade']
 
@@ -166,27 +166,67 @@ export async function getRecipeProductSummaries(): Promise<
   if ('error' in result) return []
 
   const supabase = await createClient()
-  const { data, error } = await supabase
+  const { data: products, error: productsError } = await supabase
     .from('products')
-    .select('*, recipes(id, recipe_items(id))')
+    .select('*')
     .eq('company_id', result.companyId)
     .order('name')
-    .returns<(ProductRow & { recipes?: RecipeWithItemsRow[] })[]>()
+    .returns<ProductRow[]>()
 
-  if (error) {
-    console.error('getRecipeProductSummaries error:', error.message)
+  if (productsError) {
+    console.error('getRecipeProductSummaries products error:', productsError.message)
     return []
   }
 
-  return (data ?? []).map((row) => {
-    const recipe = row.recipes?.[0] ?? null
-    const { recipes: unusedRecipes, ...productRow } = row
-    void unusedRecipes
+  const productIds = (products ?? []).map((product) => product.id)
+  if (productIds.length === 0) return []
+
+  const { data: recipes, error: recipesError } = await supabase
+    .from('recipes')
+    .select('id, product_id')
+    .eq('company_id', result.companyId)
+    .in('product_id', productIds)
+    .returns<RecipeSummaryRow[]>()
+
+  if (recipesError) {
+    console.error('getRecipeProductSummaries recipes error:', recipesError.message)
+    return []
+  }
+
+  const recipesByProductId = new Map(
+    (recipes ?? []).map((recipe) => [recipe.product_id, recipe]),
+  )
+  const recipeIds = (recipes ?? []).map((recipe) => recipe.id)
+  const itemCountsByRecipeId = new Map<string, number>()
+
+  if (recipeIds.length > 0) {
+    const { data: recipeItems, error: itemsError } = await supabase
+      .from('recipe_items')
+      .select('recipe_id')
+      .eq('company_id', result.companyId)
+      .in('recipe_id', recipeIds)
+      .returns<RecipeItemSummaryRow[]>()
+
+    if (itemsError) {
+      console.error('getRecipeProductSummaries items error:', itemsError.message)
+      return []
+    }
+
+    for (const item of recipeItems ?? []) {
+      itemCountsByRecipeId.set(
+        item.recipe_id,
+        (itemCountsByRecipeId.get(item.recipe_id) ?? 0) + 1,
+      )
+    }
+  }
+
+  return (products ?? []).map((product) => {
+    const recipe = recipesByProductId.get(product.id) ?? null
 
     return {
-      product: normalizeProduct(productRow as Product),
+      product: normalizeProduct(product as Product),
       recipe_id: recipe?.id ?? null,
-      item_count: recipe?.recipe_items?.length ?? 0,
+      item_count: recipe ? itemCountsByRecipeId.get(recipe.id) ?? 0 : 0,
     }
   })
 }

@@ -1244,7 +1244,7 @@ RETURNS VOID AS $$
 DECLARE
   order_row RECORD;
   order_item RECORD;
-  recipe_id UUID;
+  v_recipe_id UUID;
   recipe_item RECORD;
   required_by_ingredient JSONB := '{}'::jsonb;
   converted_quantity NUMERIC;
@@ -1306,19 +1306,19 @@ BEGIN
     ORDER BY item.id
   LOOP
     SELECT recipe.id
-    INTO recipe_id
+    INTO v_recipe_id
     FROM public.recipes recipe
     WHERE recipe.product_id = order_item.product_id
       AND recipe.company_id = p_company_id;
 
-    IF recipe_id IS NULL THEN
+    IF v_recipe_id IS NULL THEN
       RAISE EXCEPTION 'Produto sem ficha técnica: %.', order_item.product_name;
     END IF;
 
     IF NOT EXISTS (
       SELECT 1
       FROM public.recipe_items item
-      WHERE item.recipe_id = recipe_id
+      WHERE item.recipe_id = v_recipe_id
         AND item.company_id = p_company_id
     ) THEN
       RAISE EXCEPTION 'Produto sem ficha técnica: %.', order_item.product_name;
@@ -1335,7 +1335,7 @@ BEGIN
       JOIN public.ingredients ingredient
         ON ingredient.id = item.ingredient_id
        AND ingredient.company_id = p_company_id
-      WHERE item.recipe_id = recipe_id
+      WHERE item.recipe_id = v_recipe_id
         AND item.company_id = p_company_id
       ORDER BY ingredient.id
     LOOP
