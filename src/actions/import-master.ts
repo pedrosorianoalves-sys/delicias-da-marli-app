@@ -7,11 +7,28 @@ import { createClient } from '@/lib/supabase/server'
 import {
   areUnitsCompatible,
   convertQuantityToIngredientUnit,
+  roundCost,
+  roundCurrency,
 } from '@/lib/product-costing'
 import { recalculateProductMetrics } from '@/lib/supabase/product-metrics'
-import type { ActionResponse, Ingredient, Product, Unit } from '@/types'
+import type {
+  ActionResponse,
+  Customer,
+  Ingredient,
+  OrderStatus,
+  PaymentMethod,
+  Product,
+  Unit,
+} from '@/types'
 
 const VALID_UNITS: Unit[] = ['g', 'kg', 'ml', 'l', 'unidade']
+const VALID_ORDER_STATUSES: OrderStatus[] = ['pendente', 'pago', 'entregue', 'cancelado']
+const VALID_PAYMENT_METHODS: PaymentMethod[] = [
+  'pix_manual',
+  'dinheiro',
+  'cartao',
+  'outro',
+]
 
 type ImportPurchaseInput = {
   quantity?: unknown
@@ -46,9 +63,43 @@ type ImportProductInput = {
   recipe?: ImportRecipeItemInput[]
 }
 
+type ImportCustomerInput = {
+  name?: unknown
+  phone?: unknown
+  email?: unknown
+  address?: unknown
+  notes?: unknown
+}
+
+type ImportOrderCustomerInput = {
+  name?: unknown
+  phone?: unknown
+  email?: unknown
+}
+
+type ImportOrderItemInput = {
+  product?: unknown
+  quantity?: unknown
+  unit_price?: unknown
+  courtesy_quantity?: unknown
+}
+
+type ImportOrderInput = {
+  customer?: ImportOrderCustomerInput
+  status?: unknown
+  payment_method?: unknown
+  discount?: unknown
+  ordered_at?: unknown
+  order_date?: unknown
+  notes?: unknown
+  items?: ImportOrderItemInput[]
+}
+
 type ImportPayload = {
   ingredients?: ImportIngredientInput[]
   products?: ImportProductInput[]
+  customers?: ImportCustomerInput[]
+  orders?: ImportOrderInput[]
 }
 
 export type ImportIssue = {
@@ -84,6 +135,32 @@ export type ImportPreview = {
     quantity: number
     unit: Unit
   }[]
+  customers: {
+    name: string
+    phone: string | null
+    email: string | null
+    action: 'novo' | 'atualizar' | 'reutilizar' | 'ambiguo'
+    alerts: string[]
+  }[]
+  orders: {
+    customer: string
+    status: OrderStatus
+    payment_method: PaymentMethod | null
+    ordered_at: string
+    items_count: number
+    subtotal: number
+    total: number
+    will_deduct_stock: boolean
+    alerts: string[]
+  }[]
+  order_items: {
+    order_index: number
+    product: string
+    quantity: number
+    courtesy_quantity: number
+    unit_price: number | null
+    product_found: boolean
+  }[]
 }
 
 export type ImportSummary = {
@@ -95,6 +172,14 @@ export type ImportSummary = {
   products_updated: number
   recipes_replaced: number
   recipe_items_created: number
+  customers_created: number
+  customers_updated: number
+  orders_created: number
+  orders_paid: number
+  orders_pending: number
+  orders_cancelled: number
+  order_items_created: number
+  orders_stock_deducted: number
 }
 
 export type ImportValidationResult = {
@@ -138,6 +223,40 @@ type NormalizedProduct = {
   recipe: NormalizedRecipeItem[]
 }
 
+type NormalizedCustomer = {
+  name: string
+  phone: string | null
+  email: string | null
+  address: string | null
+  notes: string | null
+  hasPhone: boolean
+  hasEmail: boolean
+  hasAddress: boolean
+  hasNotes: boolean
+}
+
+type NormalizedOrderCustomer = Pick<
+  NormalizedCustomer,
+  'name' | 'phone' | 'email' | 'hasPhone' | 'hasEmail'
+>
+
+type NormalizedOrderItem = {
+  product: string
+  quantity: number
+  unitPrice: number | null
+  courtesyQuantity: number
+}
+
+type NormalizedOrder = {
+  customer: NormalizedOrderCustomer
+  status: OrderStatus
+  paymentMethod: PaymentMethod | null
+  discount: number
+  orderedAt: string
+  notes: string | null
+  items: NormalizedOrderItem[]
+}
+
 type NormalizedRecipeItem = {
   ingredient: string
   quantity: number
@@ -147,6 +266,8 @@ type NormalizedRecipeItem = {
 type NormalizedPayload = {
   ingredients: NormalizedIngredient[]
   products: NormalizedProduct[]
+  customers: NormalizedCustomer[]
+  orders: NormalizedOrder[]
 }
 
 type IngredientRow = Pick<
@@ -157,7 +278,20 @@ type IngredientRow = Pick<
   supplier: string | null
 }
 
-type ProductRow = Pick<Product, 'id' | 'name' | 'sale_price'>
+type ProductRow = Pick<Product, 'id' | 'name' | 'sale_price' | 'estimated_cost'>
+
+type CustomerRow = Pick<
+  Customer,
+  | 'id'
+  | 'name'
+  | 'phone'
+  | 'email'
+  | 'address'
+  | 'notes'
+  | 'total_spent'
+  | 'total_orders'
+  | 'last_order_at'
+>
 
 type SupabaseErrorLike = {
   message?: string
@@ -167,7 +301,19 @@ type SupabaseErrorLike = {
 }
 
 function normalizeName(value: string) {
-  return value.trim().toLocaleLowerCase('pt-BR')
+  return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase('pt-BR')
+}
+
+function normalizePhone(value: string | null | undefined) {
+  const digits = (value ?? '').replace(/\D/g, '')
+  if (!digits) return null
+  if (digits.startsWith('55') && digits.length > 11) return digits.slice(2)
+  return digits
+}
+
+function normalizeEmail(value: string | null | undefined) {
+  const email = (value ?? '').trim().toLocaleLowerCase('pt-BR')
+  return email || null
 }
 
 function asString(value: unknown) {
@@ -189,6 +335,40 @@ function asNumber(value: unknown) {
 
 function isUnit(value: unknown): value is Unit {
   return typeof value === 'string' && VALID_UNITS.includes(value as Unit)
+}
+
+function isOrderStatus(value: unknown): value is OrderStatus {
+  return typeof value === 'string' && VALID_ORDER_STATUSES.includes(value as OrderStatus)
+}
+
+function isPaymentMethod(value: unknown): value is PaymentMethod {
+  return typeof value === 'string' && VALID_PAYMENT_METHODS.includes(value as PaymentMethod)
+}
+
+function isValidEmail(value: string | null) {
+  return !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+}
+
+function getCustomerMatchKey(customer: NormalizedOrderCustomer | NormalizedCustomer) {
+  if (customer.phone) return `phone:${customer.phone}`
+  if (customer.email) return `email:${customer.email}`
+  return `name:${normalizeName(customer.name)}`
+}
+
+function getPreviewCustomers(normalized: NormalizedPayload) {
+  const customers = new Map<string, NormalizedCustomer>()
+
+  for (const customer of normalized.customers) {
+    customers.set(getCustomerMatchKey(customer), customer)
+  }
+
+  for (const order of normalized.orders) {
+    const customer = orderCustomerToCustomer(order.customer)
+    const key = getCustomerMatchKey(customer)
+    if (!customers.has(key)) customers.set(key, customer)
+  }
+
+  return Array.from(customers.values())
 }
 
 function formatSupabaseError({
@@ -245,6 +425,8 @@ function normalizePayload(payload: ImportPayload) {
     ? payload.ingredients
     : []
   const productsInput = Array.isArray(payload.products) ? payload.products : []
+  const customersInput = Array.isArray(payload.customers) ? payload.customers : []
+  const ordersInput = Array.isArray(payload.orders) ? payload.orders : []
 
   if (!Array.isArray(payload.ingredients) && payload.ingredients !== undefined) {
     issues.push({ path: 'ingredients', message: 'ingredients deve ser uma lista.' })
@@ -252,10 +434,21 @@ function normalizePayload(payload: ImportPayload) {
   if (!Array.isArray(payload.products) && payload.products !== undefined) {
     issues.push({ path: 'products', message: 'products deve ser uma lista.' })
   }
-  if (ingredientsInput.length === 0 && productsInput.length === 0) {
+  if (!Array.isArray(payload.customers) && payload.customers !== undefined) {
+    issues.push({ path: 'customers', message: 'customers deve ser uma lista.' })
+  }
+  if (!Array.isArray(payload.orders) && payload.orders !== undefined) {
+    issues.push({ path: 'orders', message: 'orders deve ser uma lista.' })
+  }
+  if (
+    ingredientsInput.length === 0 &&
+    productsInput.length === 0 &&
+    customersInput.length === 0 &&
+    ordersInput.length === 0
+  ) {
     issues.push({
       path: '$',
-      message: 'Informe pelo menos um ingrediente ou produto.',
+      message: 'Informe pelo menos um ingrediente, produto, cliente ou pedido.',
     })
   }
 
@@ -419,8 +612,154 @@ function normalizePayload(payload: ImportPayload) {
     }
   })
 
-  const preview = buildPreview({ ingredients, products })
-  return { normalized: { ingredients, products }, preview, issues }
+  const customers: NormalizedCustomer[] = []
+  customersInput.forEach((item, index) => {
+    const path = `customers[${index}]`
+    const name = asString(item.name)
+    const phone = normalizePhone(asOptionalString(item.phone))
+    const email = normalizeEmail(asOptionalString(item.email))
+    const address = asOptionalString(item.address)
+    const notes = asOptionalString(item.notes)
+
+    if (!name) issues.push({ path: `${path}.name`, message: 'Nome é obrigatório.' })
+    if (!isValidEmail(email)) issues.push({ path: `${path}.email`, message: 'Email inválido.' })
+
+    if (name && isValidEmail(email)) {
+      customers.push({
+        name,
+        phone,
+        email,
+        address,
+        notes,
+        hasPhone: item.phone !== undefined,
+        hasEmail: item.email !== undefined,
+        hasAddress: item.address !== undefined,
+        hasNotes: item.notes !== undefined,
+      })
+    }
+  })
+
+  const orders: NormalizedOrder[] = []
+  ordersInput.forEach((item, index) => {
+    const path = `orders[${index}]`
+    const customerInput = item.customer
+    const customerName = asString(customerInput?.name)
+    const customerPhone = normalizePhone(asOptionalString(customerInput?.phone))
+    const customerEmail = normalizeEmail(asOptionalString(customerInput?.email))
+    const statusValue = item.status ?? 'pendente'
+    const paymentMethodValue = item.payment_method
+    const discount = item.discount === undefined ? 0 : asNumber(item.discount)
+    const orderedAtValue = asString(item.ordered_at ?? item.order_date)
+    const orderedAt = orderedAtValue || new Date().toISOString()
+    const notes = asOptionalString(item.notes)
+    const itemsInput = Array.isArray(item.items) ? item.items : []
+
+    if (!customerInput || typeof customerInput !== 'object') {
+      issues.push({ path: `${path}.customer`, message: 'Cliente do pedido é obrigatório.' })
+    }
+    if (!customerName) {
+      issues.push({ path: `${path}.customer.name`, message: 'Nome do cliente é obrigatório.' })
+    }
+    if (!isValidEmail(customerEmail)) {
+      issues.push({ path: `${path}.customer.email`, message: 'Email inválido.' })
+    }
+    if (!isOrderStatus(statusValue)) {
+      issues.push({ path: `${path}.status`, message: 'Status do pedido inválido.' })
+    }
+    if (paymentMethodValue !== undefined && paymentMethodValue !== null && paymentMethodValue !== '') {
+      if (!isPaymentMethod(paymentMethodValue)) {
+        issues.push({
+          path: `${path}.payment_method`,
+          message: 'Forma de pagamento inválida.',
+        })
+      }
+    }
+    if (Number.isNaN(discount) || discount < 0) {
+      issues.push({ path: `${path}.discount`, message: 'Desconto inválido.' })
+    }
+    if (Number.isNaN(Date.parse(orderedAt))) {
+      issues.push({ path: `${path}.ordered_at`, message: 'Data do pedido inválida.' })
+    }
+    if (!Array.isArray(item.items)) {
+      issues.push({ path: `${path}.items`, message: 'Itens do pedido devem ser uma lista.' })
+    }
+    if (itemsInput.length === 0) {
+      issues.push({ path: `${path}.items`, message: 'Pedido deve ter ao menos um item.' })
+    }
+
+    const orderItems: NormalizedOrderItem[] = []
+    itemsInput.forEach((orderItem, itemIndex) => {
+      const itemPath = `${path}.items[${itemIndex}]`
+      const product = asString(orderItem.product)
+      const quantity = asNumber(orderItem.quantity)
+      const unitPrice =
+        orderItem.unit_price === undefined || orderItem.unit_price === null || orderItem.unit_price === ''
+          ? null
+          : asNumber(orderItem.unit_price)
+      const courtesyQuantity =
+        orderItem.courtesy_quantity === undefined
+          ? 0
+          : asNumber(orderItem.courtesy_quantity)
+
+      if (!product) issues.push({ path: `${itemPath}.product`, message: 'Produto é obrigatório.' })
+      if (Number.isNaN(quantity) || quantity <= 0) {
+        issues.push({ path: `${itemPath}.quantity`, message: 'Quantidade deve ser maior que zero.' })
+      }
+      if (unitPrice !== null && (Number.isNaN(unitPrice) || unitPrice < 0)) {
+        issues.push({ path: `${itemPath}.unit_price`, message: 'Preço unitário inválido.' })
+      }
+      if (Number.isNaN(courtesyQuantity) || courtesyQuantity < 0) {
+        issues.push({
+          path: `${itemPath}.courtesy_quantity`,
+          message: 'Quantidade de cortesia deve ser maior ou igual a zero.',
+        })
+      }
+
+      if (
+        product &&
+        !Number.isNaN(quantity) &&
+        quantity > 0 &&
+        (unitPrice === null || !Number.isNaN(unitPrice)) &&
+        !Number.isNaN(courtesyQuantity) &&
+        courtesyQuantity >= 0
+      ) {
+        orderItems.push({
+          product,
+          quantity,
+          unitPrice,
+          courtesyQuantity,
+        })
+      }
+    })
+
+    if (
+      customerName &&
+      isOrderStatus(statusValue) &&
+      isValidEmail(customerEmail) &&
+      !Number.isNaN(discount) &&
+      !Number.isNaN(Date.parse(orderedAt)) &&
+      orderItems.length > 0
+    ) {
+      orders.push({
+        customer: {
+          name: customerName,
+          phone: customerPhone,
+          email: customerEmail,
+          hasPhone: customerInput?.phone !== undefined,
+          hasEmail: customerInput?.email !== undefined,
+        },
+        status: statusValue,
+        paymentMethod: isPaymentMethod(paymentMethodValue) ? paymentMethodValue : null,
+        discount,
+        orderedAt: new Date(orderedAt).toISOString(),
+        notes,
+        items: orderItems,
+      })
+    }
+  })
+
+  const preview = buildPreview({ ingredients, products, customers, orders })
+  return { normalized: { ingredients, products, customers, orders }, preview, issues }
 }
 
 function buildPreview(normalized: NormalizedPayload): ImportPreview {
@@ -460,6 +799,40 @@ function buildPreview(normalized: NormalizedPayload): ImportPreview {
         unit: item.unit,
       })),
     ),
+    customers: getPreviewCustomers(normalized).map((customer) => ({
+      name: customer.name,
+      phone: customer.phone,
+      email: customer.email,
+      action: 'novo',
+      alerts: [],
+    })),
+    orders: normalized.orders.map((order) => {
+      const subtotal = order.items.reduce((sum, item) => {
+        return sum + item.quantity * Number(item.unitPrice ?? 0)
+      }, 0)
+
+      return {
+        customer: order.customer.name,
+        status: order.status,
+        payment_method: order.paymentMethod,
+        ordered_at: order.orderedAt,
+        items_count: order.items.length,
+        subtotal: roundCurrency(subtotal),
+        total: roundCurrency(Math.max(0, subtotal - order.discount)),
+        will_deduct_stock: order.status === 'pago' || order.status === 'entregue',
+        alerts: [],
+      }
+    }),
+    order_items: normalized.orders.flatMap((order, orderIndex) =>
+      order.items.map((item) => ({
+        order_index: orderIndex,
+        product: item.product,
+        quantity: item.quantity,
+        courtesy_quantity: item.courtesyQuantity,
+        unit_price: item.unitPrice,
+        product_found: false,
+      })),
+    ),
   }
 }
 
@@ -469,6 +842,8 @@ function revalidateImportPaths() {
   revalidatePath('/compras')
   revalidatePath('/produtos')
   revalidatePath('/receitas')
+  revalidatePath('/clientes')
+  revalidatePath('/pedidos')
   revalidatePath('/dashboard')
 }
 
@@ -498,7 +873,7 @@ async function insertProductWithMetrics({
       ...productData,
       cmv_percent: 0,
     })
-    .select('id, name, sale_price')
+    .select('id, name, sale_price, estimated_cost')
     .single<ProductRow>()
 
   if (!insert.error) return insert
@@ -511,7 +886,7 @@ async function insertProductWithMetrics({
       ...productData,
       cmv: 0,
     })
-    .select('id, name, sale_price')
+    .select('id, name, sale_price, estimated_cost')
     .single<ProductRow>()
 }
 
@@ -542,16 +917,529 @@ async function updateProductWithMetrics({
   return update
 }
 
+function getCustomerMatches(customers: CustomerRow[], customer: NormalizedOrderCustomer | NormalizedCustomer) {
+  if (customer.phone) {
+    return customers.filter((row) => normalizePhone(row.phone) === customer.phone)
+  }
+
+  if (customer.email) {
+    return customers.filter((row) => normalizeEmail(row.email) === customer.email)
+  }
+
+  return customers.filter((row) => normalizeName(row.name) === normalizeName(customer.name))
+}
+
+function shouldUpdateCustomer(existing: CustomerRow, customer: NormalizedCustomer) {
+  if (existing.name !== customer.name) return true
+  if (customer.hasPhone && customer.phone && normalizePhone(existing.phone) !== customer.phone) return true
+  if (customer.hasEmail && customer.email && normalizeEmail(existing.email) !== customer.email) return true
+  if (customer.hasAddress && customer.address && existing.address !== customer.address) return true
+  if (customer.hasNotes && customer.notes && existing.notes !== customer.notes) return true
+  return false
+}
+
+function getCustomerUpdatePayload(customer: NormalizedCustomer) {
+  const payload: Partial<Pick<Customer, 'name' | 'phone' | 'email' | 'address' | 'notes'>> = {
+    name: customer.name,
+  }
+
+  if (customer.hasPhone && customer.phone) payload.phone = customer.phone
+  if (customer.hasEmail && customer.email) payload.email = customer.email
+  if (customer.hasAddress && customer.address) payload.address = customer.address
+  if (customer.hasNotes && customer.notes) payload.notes = customer.notes
+
+  return payload
+}
+
+function buildProductGroups(products: ProductRow[]) {
+  const productsByName = new Map<string, ProductRow[]>()
+
+  for (const product of products) {
+    const key = normalizeName(product.name)
+    productsByName.set(key, [...(productsByName.get(key) ?? []), product])
+  }
+
+  return productsByName
+}
+
+function resolveProductByName(
+  productsByName: Map<string, ProductRow[]>,
+  name: string,
+): { product: ProductRow } | { error: string } {
+  const matches = productsByName.get(normalizeName(name)) ?? []
+  if (matches.length === 1 && matches[0]) return { product: matches[0] }
+  if (matches.length > 1) return { error: 'Produto ambíguo.' }
+  return { error: 'Produto não encontrado.' }
+}
+
+function getOrderTotals(items: Array<{
+  chargedQuantity: number
+  courtesyQuantity: number
+  unitPrice: number
+  estimatedCost: number
+}>, discount: number) {
+  const subtotal = items.reduce(
+    (sum, item) => sum + item.chargedQuantity * item.unitPrice,
+    0,
+  )
+  const estimatedCost = items.reduce(
+    (sum, item) =>
+      sum + (item.chargedQuantity + item.courtesyQuantity) * item.estimatedCost,
+    0,
+  )
+  const total = roundCurrency(Math.max(0, subtotal - discount))
+  const estimatedProfit = roundCurrency(total - estimatedCost)
+  const cmvPercent = total > 0 ? roundCurrency((estimatedCost / total) * 100) : 0
+
+  return {
+    subtotal: roundCurrency(subtotal),
+    total,
+    estimated_cost: roundCost(estimatedCost),
+    estimated_profit: estimatedProfit,
+    cmv_percent: cmvPercent,
+  }
+}
+
+async function buildDatabasePreview({
+  supabase,
+  companyId,
+  normalized,
+  basePreview,
+}: {
+  supabase: Awaited<ReturnType<typeof createClient>>
+  companyId: string
+  normalized: NormalizedPayload
+  basePreview: ImportPreview
+}) {
+  const [{ data: customers }, { data: products }] = await Promise.all([
+    supabase
+      .from('customers')
+      .select('id, name, phone, email, address, notes, total_spent, total_orders, last_order_at')
+      .eq('company_id', companyId)
+      .returns<CustomerRow[]>(),
+    supabase
+      .from('products')
+      .select('id, name, sale_price, estimated_cost')
+      .eq('company_id', companyId)
+      .returns<ProductRow[]>(),
+  ])
+
+  const customerRows = customers ?? []
+  const productRows = products ?? []
+  const productsByName = buildProductGroups([
+    ...productRows,
+    ...normalized.products.map((product) => ({
+      id: '',
+      name: product.name,
+      sale_price: product.salePrice,
+      estimated_cost: 0,
+    })),
+  ])
+
+  return {
+    ...basePreview,
+    customers: getPreviewCustomers(normalized).map((customer) => {
+      const matches = getCustomerMatches(customerRows, customer)
+      const alerts =
+        matches.length > 1
+          ? ['Cliente ambíguo: mais de um cadastro possível.']
+          : []
+      const action =
+        matches.length > 1
+          ? 'ambiguo'
+          : matches.length === 0
+            ? 'novo'
+            : shouldUpdateCustomer(matches[0], customer)
+              ? 'atualizar'
+              : 'reutilizar'
+
+      return {
+        name: customer.name,
+        phone: customer.phone,
+        email: customer.email,
+        action,
+        alerts,
+      }
+    }),
+    orders: normalized.orders.map((order) => {
+      const alerts: string[] = []
+      const customerMatches = getCustomerMatches(customerRows, order.customer)
+
+      if (customerMatches.length > 1) {
+        alerts.push('Cliente ambíguo: pedido não será importado automaticamente.')
+      }
+
+      const subtotal = order.items.reduce((sum, item) => {
+        const productResult = resolveProductByName(productsByName, item.product)
+        if ('error' in productResult) {
+          alerts.push(`${item.product}: ${productResult.error}`)
+          return sum
+        }
+
+        return sum + item.quantity * Number(item.unitPrice ?? productResult.product.sale_price)
+      }, 0)
+
+      if (order.status === 'cancelado') {
+        alerts.push('Pedido cancelado será criado sem baixa de estoque.')
+      }
+
+      return {
+        customer: order.customer.name,
+        status: order.status,
+        payment_method: order.paymentMethod,
+        ordered_at: order.orderedAt,
+        items_count: order.items.length,
+        subtotal: roundCurrency(subtotal),
+        total: roundCurrency(Math.max(0, subtotal - order.discount)),
+        will_deduct_stock: order.status === 'pago' || order.status === 'entregue',
+        alerts: Array.from(new Set(alerts)),
+      }
+    }),
+    order_items: normalized.orders.flatMap((order, orderIndex) =>
+      order.items.map((item) => {
+        const productResult = resolveProductByName(productsByName, item.product)
+
+        return {
+          order_index: orderIndex,
+          product: item.product,
+          quantity: item.quantity,
+          courtesy_quantity: item.courtesyQuantity,
+          unit_price:
+            item.unitPrice ??
+            ('product' in productResult ? Number(productResult.product.sale_price) : null),
+          product_found: 'product' in productResult,
+        }
+      }),
+    ),
+  } satisfies ImportPreview
+}
+
+async function upsertImportCustomer({
+  supabase,
+  companyId,
+  customerInput,
+  customerRows,
+}: {
+  supabase: Awaited<ReturnType<typeof createClient>>
+  companyId: string
+  customerInput: NormalizedCustomer
+  customerRows: CustomerRow[]
+}): Promise<
+  | { customer: CustomerRow; action: 'created' | 'updated' | 'reused' }
+  | { error: string }
+> {
+  const matches = getCustomerMatches(customerRows, customerInput)
+
+  if (matches.length > 1) {
+    return { error: 'Cliente ambíguo: mais de um cadastro possível.' }
+  }
+
+  if (matches.length === 1) {
+    const existing = matches[0]
+    if (!shouldUpdateCustomer(existing, customerInput)) {
+      return { customer: existing, action: 'reused' }
+    }
+
+    const { data, error } = await supabase
+      .from('customers')
+      .update(getCustomerUpdatePayload(customerInput))
+      .eq('id', existing.id)
+      .eq('company_id', companyId)
+      .select('id, name, phone, email, address, notes, total_spent, total_orders, last_order_at')
+      .single<CustomerRow>()
+
+    if (error || !data) {
+      return {
+        error: formatSupabaseError({
+          table: 'customers',
+          operation: 'atualizar cliente',
+          subject: customerInput.name,
+          error,
+        }),
+      }
+    }
+
+    const index = customerRows.findIndex((customer) => customer.id === data.id)
+    if (index >= 0) customerRows[index] = data
+    return { customer: data, action: 'updated' }
+  }
+
+  const { data, error } = await supabase
+    .from('customers')
+    .insert({
+      company_id: companyId,
+      name: customerInput.name,
+      phone: customerInput.phone,
+      email: customerInput.email,
+      address: customerInput.address,
+      notes: customerInput.notes,
+      total_spent: 0,
+      total_orders: 0,
+      last_order_at: null,
+    })
+    .select('id, name, phone, email, address, notes, total_spent, total_orders, last_order_at')
+    .single<CustomerRow>()
+
+  if (error || !data) {
+    return {
+      error: formatSupabaseError({
+        table: 'customers',
+        operation: 'criar cliente',
+        subject: customerInput.name,
+        error,
+      }),
+    }
+  }
+
+  customerRows.push(data)
+  return { customer: data, action: 'created' }
+}
+
+function orderCustomerToCustomer(orderCustomer: NormalizedOrderCustomer): NormalizedCustomer {
+  return {
+    name: orderCustomer.name,
+    phone: orderCustomer.phone,
+    email: orderCustomer.email,
+    address: null,
+    notes: null,
+    hasPhone: orderCustomer.hasPhone,
+    hasEmail: orderCustomer.hasEmail,
+    hasAddress: false,
+    hasNotes: false,
+  }
+}
+
+async function importNormalizedOrder({
+  supabase,
+  companyId,
+  orderInput,
+  orderIndex,
+  customerRows,
+  productsByName,
+}: {
+  supabase: Awaited<ReturnType<typeof createClient>>
+  companyId: string
+  orderInput: NormalizedOrder
+  orderIndex: number
+  customerRows: CustomerRow[]
+  productsByName: Map<string, ProductRow[]>
+}): Promise<
+  | {
+      paid: boolean
+      pending: boolean
+      cancelled: boolean
+      orderItemsCreated: number
+      stockMovementsCreated: number
+      customerAction: 'created' | 'updated' | 'reused'
+    }
+  | { error: string }
+> {
+  const customerResult = await upsertImportCustomer({
+    supabase,
+    companyId,
+    customerInput: orderCustomerToCustomer(orderInput.customer),
+    customerRows,
+  })
+
+  if ('error' in customerResult) {
+    return { error: `orders[${orderIndex}].customer: ${customerResult.error}` }
+  }
+
+  const resolvedItems: Array<{
+    product: ProductRow
+    chargedQuantity: number
+    courtesyQuantity: number
+    unitPrice: number
+    estimatedCost: number
+  }> = []
+
+  for (const [itemIndex, item] of orderInput.items.entries()) {
+    const productResult = resolveProductByName(productsByName, item.product)
+    if ('error' in productResult) {
+      return {
+        error: `orders[${orderIndex}].items[${itemIndex}].product: ${productResult.error}`,
+      }
+    }
+
+    resolvedItems.push({
+      product: productResult.product,
+      chargedQuantity: item.quantity,
+      courtesyQuantity: item.courtesyQuantity,
+      unitPrice: roundCurrency(Number(item.unitPrice ?? productResult.product.sale_price)),
+      estimatedCost: roundCost(Number(productResult.product.estimated_cost ?? 0)),
+    })
+  }
+
+  const totals = getOrderTotals(resolvedItems, orderInput.discount)
+  if (orderInput.discount > totals.subtotal) {
+    return { error: `orders[${orderIndex}].discount: Desconto maior que subtotal.` }
+  }
+
+  const initialStatus = orderInput.status === 'cancelado' ? 'cancelado' : 'pendente'
+  const { data: order, error: orderError } = await supabase
+    .from('orders')
+    .insert({
+      company_id: companyId,
+      customer_id: customerResult.customer.id,
+      status: initialStatus,
+      payment_method: orderInput.paymentMethod,
+      discount: orderInput.discount,
+      subtotal: totals.subtotal,
+      total: totals.total,
+      estimated_cost: totals.estimated_cost,
+      estimated_profit: totals.estimated_profit,
+      cmv_percent: totals.cmv_percent,
+      stock_deducted: false,
+      notes: orderInput.notes,
+      order_date: orderInput.orderedAt,
+    })
+    .select('id')
+    .single<{ id: string }>()
+
+  if (orderError || !order) {
+    return {
+      error: formatSupabaseError({
+        table: 'orders',
+        operation: 'criar pedido',
+        subject: String(orderIndex + 1),
+        error: orderError,
+      }),
+    }
+  }
+
+  const itemRows = resolvedItems.flatMap((item) => {
+    const rows = [
+      {
+        company_id: companyId,
+        order_id: order.id,
+        product_id: item.product.id,
+        quantity: item.chargedQuantity,
+        unit_price: item.unitPrice,
+        total_price: roundCurrency(item.chargedQuantity * item.unitPrice),
+        unit_estimated_cost: item.estimatedCost,
+        total_estimated_cost: roundCost(item.chargedQuantity * item.estimatedCost),
+      },
+    ]
+
+    if (item.courtesyQuantity > 0) {
+      rows.push({
+        company_id: companyId,
+        order_id: order.id,
+        product_id: item.product.id,
+        quantity: item.courtesyQuantity,
+        unit_price: 0,
+        total_price: 0,
+        unit_estimated_cost: item.estimatedCost,
+        total_estimated_cost: roundCost(item.courtesyQuantity * item.estimatedCost),
+      })
+    }
+
+    return rows
+  })
+
+  const { error: itemsError } = await supabase.from('order_items').insert(itemRows)
+
+  if (itemsError) {
+    await supabase.from('orders').delete().eq('id', order.id).eq('company_id', companyId)
+    return {
+      error: formatSupabaseError({
+        table: 'order_items',
+        operation: 'criar itens do pedido',
+        subject: String(orderIndex + 1),
+        error: itemsError,
+      }),
+    }
+  }
+
+  if (orderInput.status === 'pago' || orderInput.status === 'entregue') {
+    const { error: paidError } = await supabase.rpc('mark_order_paid_transactional', {
+      p_company_id: companyId,
+      p_order_id: order.id,
+    })
+
+    if (paidError) {
+      await supabase.from('orders').delete().eq('id', order.id).eq('company_id', companyId)
+      return {
+        error: formatSupabaseError({
+          table: 'orders',
+          operation: 'marcar pedido como pago',
+          subject: String(orderIndex + 1),
+          error: paidError,
+        }),
+      }
+    }
+
+    if (orderInput.status === 'entregue') {
+      const { error: deliveredError } = await supabase
+        .from('orders')
+        .update({ status: 'entregue' satisfies OrderStatus })
+        .eq('id', order.id)
+        .eq('company_id', companyId)
+
+      if (deliveredError) {
+        return {
+          error: formatSupabaseError({
+            table: 'orders',
+            operation: 'marcar pedido como entregue',
+            subject: String(orderIndex + 1),
+            error: deliveredError,
+          }),
+        }
+      }
+    }
+
+    const { count } = await supabase
+      .from('stock_movements')
+      .select('id', { count: 'exact', head: true })
+      .eq('company_id', companyId)
+      .eq('reference_type', 'order')
+      .eq('reference_id', order.id)
+      .eq('type', 'out')
+
+    return {
+      paid: true,
+      pending: false,
+      cancelled: false,
+      orderItemsCreated: itemRows.length,
+      stockMovementsCreated: count ?? 0,
+      customerAction: customerResult.action,
+    }
+  }
+
+  return {
+    paid: false,
+    pending: orderInput.status === 'pendente',
+    cancelled: orderInput.status === 'cancelado',
+    orderItemsCreated: itemRows.length,
+    stockMovementsCreated: 0,
+    customerAction: customerResult.action,
+  }
+}
+
 export async function validateMasterImportJson(
   jsonText: string,
 ): Promise<ImportValidationResult> {
+  const context = await requireCompanyRole()
+  if ('error' in context) return { success: false, error: context.error }
+
   const parsed = parsePayload(jsonText)
   if ('error' in parsed) return { success: false, error: parsed.error }
 
-  const { preview, issues } = normalizePayload(parsed.payload)
+  const { normalized, preview, issues } = normalizePayload(parsed.payload)
+  const supabase = await createClient()
+  const databasePreview =
+    issues.length === 0
+      ? await buildDatabasePreview({
+          supabase,
+          companyId: context.companyId,
+          normalized,
+          basePreview: preview,
+        })
+      : preview
+
   return {
     success: issues.length === 0,
-    preview,
+    preview: databasePreview,
     issues,
     error: issues.length > 0 ? 'Corrija os erros antes de importar.' : undefined,
   }
@@ -580,6 +1468,12 @@ export async function importMasterJson(jsonText: string): Promise<ImportRunResul
   const supabase = await createClient()
   const summary = emptySummary()
   const importIssues: ImportIssue[] = []
+  const importPreview = await buildDatabasePreview({
+    supabase,
+    companyId: context.companyId,
+    normalized,
+    basePreview: preview,
+  })
 
   const { data: existingIngredients, error: ingredientsError } = await supabase
     .from('ingredients')
@@ -596,6 +1490,19 @@ export async function importMasterJson(jsonText: string): Promise<ImportRunResul
   for (const ingredient of existingIngredients ?? []) {
     ingredientsByName.set(normalizeName(ingredient.name), ingredient)
   }
+
+  const { data: existingCustomers, error: customersError } = await supabase
+    .from('customers')
+    .select('id, name, phone, email, address, notes, total_spent, total_orders, last_order_at')
+    .eq('company_id', context.companyId)
+    .returns<CustomerRow[]>()
+
+  if (customersError) {
+    console.error('importMasterJson customers read error:', customersError.message)
+    return { success: false, error: 'Erro ao carregar clientes atuais.' }
+  }
+
+  const customerRows = [...(existingCustomers ?? [])]
 
   for (const ingredientInput of normalized.ingredients) {
     const key = normalizeName(ingredientInput.name)
@@ -794,9 +1701,29 @@ export async function importMasterJson(jsonText: string): Promise<ImportRunResul
     }
   }
 
+  for (const customerInput of normalized.customers) {
+    const customerResult = await upsertImportCustomer({
+      supabase,
+      companyId: context.companyId,
+      customerInput,
+      customerRows,
+    })
+
+    if ('error' in customerResult) {
+      importIssues.push({
+        path: `customers.${customerInput.name}`,
+        message: customerResult.error,
+      })
+      continue
+    }
+
+    if (customerResult.action === 'created') summary.customers_created += 1
+    if (customerResult.action === 'updated') summary.customers_updated += 1
+  }
+
   const { data: existingProducts, error: productsError } = await supabase
     .from('products')
-    .select('id, name, sale_price')
+    .select('id, name, sale_price, estimated_cost')
     .eq('company_id', context.companyId)
     .returns<ProductRow[]>()
 
@@ -1003,12 +1930,54 @@ export async function importMasterJson(jsonText: string): Promise<ImportRunResul
     summary.recipes_replaced += 1
   }
 
+  const { data: orderProducts, error: orderProductsError } = await supabase
+    .from('products')
+    .select('id, name, sale_price, estimated_cost')
+    .eq('company_id', context.companyId)
+    .returns<ProductRow[]>()
+
+  if (orderProductsError) {
+    console.error('importMasterJson order products read error:', orderProductsError.message)
+    return { success: false, error: 'Erro ao carregar produtos para pedidos.' }
+  }
+
+  const orderProductsByName = buildProductGroups(orderProducts ?? [])
+
+  for (const [orderIndex, orderInput] of normalized.orders.entries()) {
+    const orderResult = await importNormalizedOrder({
+      supabase,
+      companyId: context.companyId,
+      orderInput,
+      orderIndex,
+      customerRows,
+      productsByName: orderProductsByName,
+    })
+
+    if ('error' in orderResult) {
+      importIssues.push({
+        path: `orders[${orderIndex}]`,
+        message: orderResult.error,
+      })
+      continue
+    }
+
+    summary.orders_created += 1
+    summary.order_items_created += orderResult.orderItemsCreated
+    summary.stock_movements_created += orderResult.stockMovementsCreated
+    summary.orders_stock_deducted += orderResult.paid ? 1 : 0
+    if (orderResult.paid) summary.orders_paid += 1
+    if (orderResult.pending) summary.orders_pending += 1
+    if (orderResult.cancelled) summary.orders_cancelled += 1
+    if (orderResult.customerAction === 'created') summary.customers_created += 1
+    if (orderResult.customerAction === 'updated') summary.customers_updated += 1
+  }
+
   revalidateImportPaths()
 
   return {
     success: importIssues.length === 0,
     error: importIssues.length > 0 ? 'Importação concluída com avisos.' : undefined,
-    data: { preview, summary, issues: importIssues },
+    data: { preview: importPreview, summary, issues: importIssues },
   }
 }
 
@@ -1022,5 +1991,13 @@ function emptySummary(): ImportSummary {
     products_updated: 0,
     recipes_replaced: 0,
     recipe_items_created: 0,
+    customers_created: 0,
+    customers_updated: 0,
+    orders_created: 0,
+    orders_paid: 0,
+    orders_pending: 0,
+    orders_cancelled: 0,
+    order_items_created: 0,
+    orders_stock_deducted: 0,
   }
 }

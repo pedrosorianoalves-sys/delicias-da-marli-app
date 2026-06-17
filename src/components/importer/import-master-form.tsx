@@ -38,33 +38,31 @@ import { Textarea } from '@/components/ui/textarea'
 import { formatCurrency, formatNumber } from '@/lib/constants'
 
 const EXAMPLE_JSON = `{
-  "ingredients": [
+  "customers": [
     {
-      "name": "Açúcar",
-      "unit": "kg",
-      "initial_stock": 10,
-      "minimum_stock": 2,
-      "supplier": "Mercado",
-      "purchase": {
-        "quantity": 10,
-        "unit": "kg",
-        "total_price": 34.9,
-        "supplier": "Mercado"
-      }
+      "name": "Luciana Costa",
+      "phone": "21999999999",
+      "email": "",
+      "address": "",
+      "notes": ""
     }
   ],
-  "products": [
+  "orders": [
     {
-      "name": "Bolo de pote chocolate",
-      "category": "Bolo de pote",
-      "description": "Bolo de pote sabor chocolate",
-      "sale_price": 12,
-      "active": true,
-      "recipe": [
+      "customer": {
+        "name": "Luciana Costa",
+        "phone": "21999999999"
+      },
+      "status": "pago",
+      "payment_method": "pix_manual",
+      "discount": 0,
+      "ordered_at": "2026-06-16T14:30:00",
+      "items": [
         {
-          "ingredient": "Açúcar",
-          "quantity": 200,
-          "unit": "g"
+          "product": "Bolo de pote de chocolate",
+          "quantity": 2,
+          "unit_price": 12,
+          "courtesy_quantity": 1
         }
       ]
     }
@@ -259,6 +257,151 @@ function PreviewTables({ preview }: { preview: ImportPreview }) {
           )}
         </CardContent>
       </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Clientes</CardTitle>
+          <CardDescription>
+            {preview.customers.length} cliente(s) detectado(s)
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {preview.customers.length === 0 ? (
+            <EmptyRows label="Nenhum cliente no JSON." />
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Nome</TableHead>
+                  <TableHead>Telefone</TableHead>
+                  <TableHead>Email</TableHead>
+                  <TableHead>Ação</TableHead>
+                  <TableHead>Alertas</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {preview.customers.map((customer, index) => (
+                  <TableRow key={`${customer.name}-${customer.phone ?? index}`}>
+                    <TableCell className="font-medium">{customer.name}</TableCell>
+                    <TableCell>{customer.phone ?? '-'}</TableCell>
+                    <TableCell>{customer.email ?? '-'}</TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={
+                          customer.action === 'ambiguo'
+                            ? 'destructive'
+                            : customer.action === 'novo'
+                              ? 'secondary'
+                              : 'outline'
+                        }
+                      >
+                        {customer.action}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="max-w-64 text-xs text-muted-foreground">
+                      {customer.alerts.length > 0 ? customer.alerts.join(' ') : '-'}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Pedidos</CardTitle>
+          <CardDescription>
+            {preview.orders.length} pedido(s) detectado(s)
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {preview.orders.length === 0 ? (
+            <EmptyRows label="Nenhum pedido no JSON." />
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Cliente</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Pagamento</TableHead>
+                  <TableHead>Itens</TableHead>
+                  <TableHead>Total</TableHead>
+                  <TableHead>Estoque</TableHead>
+                  <TableHead>Alertas</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {preview.orders.map((order, index) => (
+                  <TableRow key={`${order.customer}-${order.ordered_at}-${index}`}>
+                    <TableCell className="font-medium">{order.customer}</TableCell>
+                    <TableCell>
+                      <Badge variant={order.status === 'cancelado' ? 'destructive' : 'outline'}>
+                        {order.status}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>{order.payment_method ?? '-'}</TableCell>
+                    <TableCell>{order.items_count}</TableCell>
+                    <TableCell>{formatCurrency(order.total)}</TableCell>
+                    <TableCell>
+                      {order.will_deduct_stock ? 'Vai baixar' : 'Não baixa'}
+                    </TableCell>
+                    <TableCell className="max-w-72 text-xs text-muted-foreground">
+                      {order.alerts.length > 0 ? order.alerts.join(' ') : '-'}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Itens de pedido</CardTitle>
+          <CardDescription>
+            {preview.order_items.length} item(ns) de pedido
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {preview.order_items.length === 0 ? (
+            <EmptyRows label="Nenhum item de pedido no JSON." />
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Pedido</TableHead>
+                  <TableHead>Produto</TableHead>
+                  <TableHead>Qtd.</TableHead>
+                  <TableHead>Cortesia</TableHead>
+                  <TableHead>Preço</TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {preview.order_items.map((item, index) => (
+                  <TableRow key={`${item.order_index}-${item.product}-${index}`}>
+                    <TableCell>#{item.order_index + 1}</TableCell>
+                    <TableCell className="font-medium">{item.product}</TableCell>
+                    <TableCell>{formatNumber(item.quantity)}</TableCell>
+                    <TableCell>{formatNumber(item.courtesy_quantity)}</TableCell>
+                    <TableCell>
+                      {item.unit_price === null ? '-' : formatCurrency(item.unit_price)}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={item.product_found ? 'secondary' : 'destructive'}>
+                        {item.product_found ? 'Encontrado' : 'Não encontrado'}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }
@@ -281,6 +424,14 @@ function SummaryCards({ summary }: { summary: ImportSummary }) {
     ['Produtos atualizados', summary.products_updated],
     ['Receitas substituídas', summary.recipes_replaced],
     ['Itens de receita', summary.recipe_items_created],
+    ['Clientes criados', summary.customers_created],
+    ['Clientes atualizados', summary.customers_updated],
+    ['Pedidos criados', summary.orders_created],
+    ['Pedidos pagos', summary.orders_paid],
+    ['Pedidos pendentes', summary.orders_pending],
+    ['Pedidos cancelados', summary.orders_cancelled],
+    ['Itens de pedido', summary.order_items_created],
+    ['Pedidos com estoque baixado', summary.orders_stock_deducted],
   ]
 
   return (
@@ -430,7 +581,7 @@ export function ImportMasterForm() {
         <div>
           <h2 className="text-lg font-semibold tracking-tight">Preview</h2>
           <p className="text-sm text-muted-foreground">
-            Ingredientes, compras, produtos e fichas técnicas detectados.
+            Ingredientes, compras, produtos, fichas técnicas, clientes e pedidos detectados.
           </p>
         </div>
         {preview ? <PreviewTables preview={preview} /> : <EmptyPreviewMessage />}

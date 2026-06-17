@@ -6,7 +6,7 @@ export default function ImportPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Importar JSON</h1>
         <p className="text-sm text-muted-foreground">
-          Cadastre ingredientes, compras, produtos e fichas técnicas em massa.
+          Cadastre ingredientes, compras, produtos, fichas técnicas, clientes e pedidos em massa.
         </p>
       </div>
 
